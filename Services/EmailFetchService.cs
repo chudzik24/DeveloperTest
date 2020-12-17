@@ -19,7 +19,7 @@ namespace Services
         public IObservable<List<EmailHeader>> EmailHeaderObservable => _emailHeadersSubject;
         public IObservable<bool> IsProcessingObservable => _isProcessingSubject;
         #region private members
-        private const int MaxConsumers = 2;
+        private const int MaxBodyProducers = 2;
         private const int MaxHeadersConsumers = 2;
         private const int DelayOnConsumers = 10;
         private const int PriorityQueueCapacity = 1;
@@ -83,7 +83,7 @@ namespace Services
                     {
                         tasks.Add(Task.Factory.StartNew(() => StartConsumingHeaders(protocol, transportProtocol, hostName, userName, password, port, ct), ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap());
                     }
-                    for (int i = 0; i < MaxConsumers; i++)
+                    for (int i = 0; i < MaxBodyProducers; i++)
                     {
                         tasks.Add(Task.Factory.StartNew(() => StartConsuming(protocol, transportProtocol, hostName, userName, password, port, ct), ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap());
                     }
@@ -118,8 +118,14 @@ namespace Services
             {
                 string result = null;
                 headerDownloader.Connect(protocol, transportProtocol, hostName, userName, password, port);
-                while (!ct.IsCancellationRequested && _headersToProcess.TryTake(out result))
+                while (!ct.IsCancellationRequested && !_headersToProcess.IsCompleted)
                 {
+                    _headersToProcess.TryTake(out result);
+                    if (result == null)
+                    {
+                        await Task.Delay(DelayOnConsumers, ct);
+                        continue;
+                    }
                     var downloadedHeaders = headerDownloader.GetHeaders(new List<string> { result });
                     _emailHeadersSubject.OnNext(downloadedHeaders);
                     await Task.Delay(DelayOnConsumers, ct);
@@ -135,7 +141,6 @@ namespace Services
             {
                 string result = null;
                 bodyDownloader.Connect(protocol, transportProtocol, hostName, userName, password, port);
-
                 while (!ct.IsCancellationRequested && !_bodiesToProcess.IsCompleted)
                 {
                     
