@@ -6,7 +6,7 @@
         DataContext="{Binding Main, Source={StaticResource Locator}}"
         >
     <Grid>
-        <DataGrid VerticalAlignment="Top" Height="554" Margin="10,146,0,0" HorizontalAlignment="Left" Width="632" AutoGenerateColumns="False" SelectedItem="{Binding SelectedHeader}" ItemsSource="{Binding HeadersCollection}">
+        <DataGrid CanUserAddRows="False"  VerticalAlignment="Top" Height="554" Margin="10,146,0,0" HorizontalAlignment="Left" Width="632" AutoGenerateColumns="False" SelectedItem="{Binding SelectedHeader}" ItemsSource="{Binding HeadersCollection}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Date" Binding="{Binding Date, StringFormat=dd-MM-yyyy HH:mm:ss}" IsReadOnly="True" Width="130"/>
                 <DataGridTextColumn Header="From" Binding="{Binding From}" IsReadOnly="True" Width="200"/>

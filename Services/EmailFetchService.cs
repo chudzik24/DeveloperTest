@@ -22,8 +22,9 @@ namespace Services
         private const int MaxConsumers = 2;
         private const int MaxHeadersConsumers = 2;
         private const int DelayOnConsumers = 10;
-        private BlockingCollection<string> _idsToProcess = new BlockingCollection<string>();
-        private BlockingCollection<string> _priorityIdsToProcess = new BlockingCollection<string>();
+        private const int PriorityQueueCapacity = 1;
+        private BlockingCollection<string> _bodiesToProcess = new BlockingCollection<string>();
+        private BlockingCollection<string> _priorityIdsToProcess = new BlockingCollection<string>(PriorityQueueCapacity);
         private BlockingCollection<string> _headersToProcess = new BlockingCollection<string>();
         private readonly BehaviorSubject<List<EmailBody>> _emailBodiesSubject = new BehaviorSubject<List<EmailBody>>(new List<EmailBody>());
         private readonly BehaviorSubject<List<EmailHeader>> _emailHeadersSubject = new BehaviorSubject<List<EmailHeader>>(new List<EmailHeader>());
@@ -40,16 +41,15 @@ namespace Services
         }
         public void RequestEmailByHeaderId(string id)
         {
-            var containsHeader = false;
-            _processedBodyIds.TryGetValue(id, out containsHeader);
+            _processedBodyIds.TryGetValue(id, out bool containsHeader);
             if (DataIsProcessing && containsHeader)
             {
                 return;
             }
-            
+            _priorityIdsToProcess.TryTake(out string thrash);
             _priorityIdsToProcess.Add(id);
         }
-        private bool DataIsProcessing => (!_idsToProcess.IsCompleted || !_headersToProcess.IsCompleted);
+        private bool DataIsProcessing => (!_bodiesToProcess.IsCompleted || !_headersToProcess.IsCompleted);
         private bool _isBusy = false;
         public async Task FetchAllEmails(EmailProtocol protocol, TransportProtocol transportProtocol, string hostName, string userName, string password, int port, CancellationToken ct)
         {
@@ -62,33 +62,32 @@ namespace Services
                 _isBusy = true;                
                 _isProcessingSubject.OnNext(_isBusy);
                 _processedBodyIds = new ConcurrentDictionary<string, bool>();
-                _priorityIdsToProcess = new BlockingCollection<string>();
+                _priorityIdsToProcess = new BlockingCollection<string>(PriorityQueueCapacity);
                 using (var headersDownloader = _emailHeadersDownloaderFactory.CreateForProtocol(protocol))
                 {
                     headersDownloader.Connect(protocol, transportProtocol, hostName, userName, password, port);
                     var ids = headersDownloader.FetchHeaderIds();
                     headersDownloader.Disconnect();
 
-                    _idsToProcess = new BlockingCollection<string>();
+                    _bodiesToProcess = new BlockingCollection<string>(new ConcurrentQueue<string>(ids));
                     _headersToProcess = new BlockingCollection<string>(new ConcurrentQueue<string>(ids));
                     _headersToProcess.CompleteAdding();
+                    _bodiesToProcess.CompleteAdding();
                 }
                 try
                 {
 
-                    var headerConsumersTasks = new List<Task>();
-                    var bodyProducerTasks = new List<Task>();
+                    var tasks = new List<Task>();
+
                     for (int i = 0; i < MaxHeadersConsumers; i++)
                     {
-                        headerConsumersTasks.Add(Task.Factory.StartNew(() => StartConsumingHeaders(protocol, transportProtocol, hostName, userName, password, port, ct), ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap());
+                        tasks.Add(Task.Factory.StartNew(() => StartConsumingHeaders(protocol, transportProtocol, hostName, userName, password, port, ct), ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap());
                     }
                     for (int i = 0; i < MaxConsumers; i++)
                     {
-                        bodyProducerTasks.Add(Task.Factory.StartNew(() => StartConsuming(protocol, transportProtocol, hostName, userName, password, port, ct), ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap());
+                        tasks.Add(Task.Factory.StartNew(() => StartConsuming(protocol, transportProtocol, hostName, userName, password, port, ct), ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap());
                     }
-                    await Task.WhenAll(headerConsumersTasks);
-                    _idsToProcess.CompleteAdding();
-                    await Task.WhenAll(bodyProducerTasks);
+                    await Task.WhenAll(tasks);
                 }
                 catch
                 {
@@ -96,10 +95,10 @@ namespace Services
                 }
                 finally
                 {
-                    _idsToProcess = new BlockingCollection<string>();
+                    _bodiesToProcess = new BlockingCollection<string>();
                     _headersToProcess = new BlockingCollection<string>();
                     _processedBodyIds = new ConcurrentDictionary<string, bool>();
-                    _priorityIdsToProcess = new BlockingCollection<string>();
+                    _priorityIdsToProcess = new BlockingCollection<string>(PriorityQueueCapacity);
                 }
             }
             catch
@@ -123,7 +122,6 @@ namespace Services
                 {
                     var downloadedHeaders = headerDownloader.GetHeaders(new List<string> { result });
                     _emailHeadersSubject.OnNext(downloadedHeaders);
-                    _idsToProcess.Add(result);
                     await Task.Delay(DelayOnConsumers, ct);
                 }               
                 headerDownloader.Disconnect();                
@@ -138,10 +136,10 @@ namespace Services
                 string result = null;
                 bodyDownloader.Connect(protocol, transportProtocol, hostName, userName, password, port);
 
-                while (!ct.IsCancellationRequested && DataIsProcessing)
+                while (!ct.IsCancellationRequested && !_bodiesToProcess.IsCompleted)
                 {
                     
-                    if (!_priorityIdsToProcess.TryTake(out result)) { _idsToProcess.TryTake(out result); }
+                    if (!_priorityIdsToProcess.TryTake(out result)) { _bodiesToProcess.TryTake(out result); }
                     if (result == null)
                     {
                         await Task.Delay(DelayOnConsumers, ct);
