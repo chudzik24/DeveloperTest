@@ -51,16 +51,20 @@ namespace Services
         }
         private bool DataIsProcessing => (!_bodiesToProcess.IsCompleted || !_headersToProcess.IsCompleted);
         private bool _isBusy = false;
+        private static object _busyLock = new object();
         public async Task FetchAllEmails(EmailProtocol protocol, TransportProtocol transportProtocol, string hostName, string userName, string password, int port, CancellationToken ct)
         {
             try
             {
-                if (_isBusy)
+                lock (_busyLock)
                 {
-                    return;
+                    if (_isBusy)
+                    {
+                        return;
+                    }
+                    _isBusy = true;
+                    _isProcessingSubject.OnNext(_isBusy);
                 }
-                _isBusy = true;                
-                _isProcessingSubject.OnNext(_isBusy);
                 _processedBodyIds = new ConcurrentDictionary<string, bool>();
                 _priorityIdsToProcess = new BlockingCollection<string>(PriorityQueueCapacity);
                 using (var headersDownloader = _emailHeadersDownloaderFactory.CreateForProtocol(protocol))
@@ -107,8 +111,11 @@ namespace Services
             }
             finally
             {
-                _isBusy = false;
-                _isProcessingSubject.OnNext(_isBusy);          
+                lock (_busyLock)
+                {
+                    _isBusy = false;
+                    _isProcessingSubject.OnNext(_isBusy);
+                }
             }
         }
 
